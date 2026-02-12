@@ -1,0 +1,9 @@
+pypdf>=4.0.0
+pdfplumber>=0.11.0
+qrcode[pil]>=7.4.2
+reportlab>=4.2.0
+pymupdf>=1.24.0
+pyzbar>=0.1.9
+Pillow>=10.0.0
+# Opcijsko za dekodiranje QR brez zbar: pip install opencv-python-headless
+opencv-python-headless>=4.8.0
