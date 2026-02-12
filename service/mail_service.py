@@ -4,6 +4,7 @@ Mail service: IMAP fetch, process PDF attachments with UNP->EPC QR, reply via SM
 """
 import email
 import imaplib
+import logging
 import os
 import smtplib
 import sys
@@ -18,6 +19,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pdf_io import process_pdf, format_payment_register_text
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -81,7 +90,7 @@ def fetch_attachments(imap: imaplib.IMAP4, mailbox: str) -> list:
             if attachments:
                 result.append((num, from_addr, subject, attachments))
         except Exception as e:
-            print(f"Error parsing message {num}: {e}", file=sys.stderr)
+            logger.exception("Error parsing message %s", num)
     return result
 
 
@@ -96,9 +105,14 @@ def process_attachment(pdf_bytes: bytes, original_name: str, out_dir: Path) -> t
     converted_path = out_dir / f"{base}_epc_qr.pdf"
     try:
         payments, _ = process_pdf(input_path, str(converted_path))
+        total = sum(p.amount for p in payments)
+        logger.info(
+            "Parsed %s: %d payment(s), total %.2f EUR",
+            original_name, len(payments), total,
+        )
         return str(converted_path), payments
     except Exception as e:
-        print(f"Convert failed for {original_name}: {e}", file=sys.stderr)
+        logger.warning("Convert failed for %s: %s", original_name, e)
         return None, None
     finally:
         try:
@@ -128,6 +142,7 @@ def send_reply(config: dict, to_addr: str, subject: str, body: str, attachments:
             smtp.starttls()
         smtp.login(config["smtp_user"], config["smtp_password"])
         smtp.sendmail(config["from_email"], [to_addr], msg.as_string())
+    logger.info("Reply sent to %s | subject: %s", to_addr, subject)
 
 
 def run_once(config: dict) -> None:
@@ -137,11 +152,18 @@ def run_once(config: dict) -> None:
         try:
             imap.login(config["imap_user"], config["imap_password"])
         except imaplib.IMAP4.error as e:
-            print(f"IMAP login failed: {e}", file=sys.stderr)
+            logger.error("IMAP login failed: %s", e)
             return
         try:
             messages = fetch_attachments(imap, config["imap_mailbox"])
+            if not messages:
+                return
+            logger.info("Found %d message(s) with PDF attachment(s)", len(messages))
             for num, from_addr, subject, attachments in messages:
+                logger.info(
+                    "Processing message from %s | subject: %s | %d PDF(s)",
+                    from_addr, subject or "(no subject)", len(attachments),
+                )
                 reply_attachments = []
                 body_parts = []
                 for filename, pdf_bytes in attachments:
@@ -172,10 +194,11 @@ def run_once(config: dict) -> None:
                     )
                     try:
                         imap.store(num, "+FLAGS", "\\Deleted")
+                        logger.info("Message deleted from mailbox (reply sent to %s)", from_addr)
                     except Exception as e:
-                        print(f"IMAP delete failed: {e}", file=sys.stderr)
+                        logger.error("IMAP delete failed: %s", e)
                 except Exception as e:
-                    print(f"SMTP send failed to {from_addr}: {e}", file=sys.stderr)
+                    logger.exception("SMTP send failed to %s", from_addr)
         finally:
             try:
                 imap.expunge()
@@ -188,13 +211,17 @@ def main() -> int:
     try:
         config = get_config()
     except RuntimeError as e:
-        print(e, file=sys.stderr)
+        logger.error("%s", e)
         return 1
+    logger.info(
+        "Started: IMAP %s, SMTP %s, poll every %ds",
+        config["imap_host"], config["smtp_host"], config["poll_interval"],
+    )
     while True:
         try:
             run_once(config)
         except Exception as e:
-            print(f"Run error: {e}", file=sys.stderr)
+            logger.exception("Run error: %s", e)
         time.sleep(config["poll_interval"])
     return 0
 

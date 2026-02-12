@@ -1,55 +1,69 @@
-# UNP/UPN → EPC QR (Revolut)
+# UNP→EPC QR Mail Service
 
-Программа извлекает платёжные данные из **содержимого UNP/UPN QR-кодов** в PDF (словенские платёжные поручения) и формирует новый PDF с **EPC QR-кодами** (формат SEPA, поддерживается Revolut и другими EU-банками) и **реестром распознанных платежей** (суммы и итог).
+Docker service that monitors an IMAP mailbox, converts PDF attachments containing UNP QR codes to EPC QR (Revolut-compatible), and replies via SMTP. Processed messages are deleted from the server after a successful reply.
 
-## Как это работает
+## Behaviour
 
-1. Из PDF извлекаются **изображения QR-кодов**, каждый декодируется в строку.
-2. Строка разбирается как **UPN QR** (формат upn-qr.si): поля через `\n`, первая строка `UPNQR`. Из них берутся IBAN, сумма, референс, получатель, назначение.
-3. Если **UNP/UPN QR-кодов в PDF нет** или их не удаётся прочитать, программа завершается с сообщением об этом (парсинг текста не используется).
+1. Connects to IMAP and fetches **unread** messages from the configured mailbox.
+2. For each message, collects **PDF attachments**.
+3. For each PDF: runs the UNP→EPC QR converter. If UNP codes are found, produces a converted PDF.
+4. Sends a **reply** to the sender (`From` address) with:
+   - **Subject:** `RE: ` + original subject
+   - **Body:** Plain-text payment register (list of payments and total)
+   - **Attachments:** Original PDF(s) + converted PDF(s) (when conversion succeeded)
+5. After successful send, **deletes** the message from the mailbox (IMAP `\Deleted` + expunge).
 
-На основе распознанных платежей:
-- для каждого строится строка **EPC QR** (BCD/002/SCT) и генерируется изображение QR;
-- формируется **итоговый PDF**: титул, реестр (таблица с суммами и итогом), затем для каждого платежа блок: **слева** — QR-код, **справа** — компактное описание (Recipient, IBAN, сумма, референс, назначение). Платежи визуально разделены (рамка и отступ между блоками).
+## Environment variables
 
-## Зависимости
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `IMAP_HOST` | yes | — | IMAP server hostname |
+| `IMAP_PORT` | no | `993` | IMAP port (SSL) |
+| `IMAP_USER` | yes | — | Mailbox login |
+| `IMAP_PASSWORD` | yes | — | Mailbox password |
+| `IMAP_MAILBOX` | no | `INBOX` | Mailbox name to monitor |
+| `SMTP_HOST` | yes | — | SMTP server hostname |
+| `SMTP_PORT` | no | `587` | SMTP port |
+| `SMTP_USER` | yes | — | SMTP login |
+| `SMTP_PASSWORD` | yes | — | SMTP password |
+| `SMTP_USE_TLS` | no | `1` | Use STARTTLS (`1`/`0`, `true`/`false`) |
+| `FROM_EMAIL` | no | same as `IMAP_USER` | Sender address for replies |
+| `POLL_INTERVAL` | no | `60` | Seconds between mailbox checks |
+
+## Build and run
+
+From the **repository root** (parent of `service/`):
 
 ```bash
-pip install -r requirements.txt
+docker build -f service/Dockerfile -t unp-epc-qr-mail .
+docker run --rm -e IMAP_HOST=imap.example.com -e IMAP_USER=... -e IMAP_PASSWORD=... \
+  -e SMTP_HOST=smtp.example.com -e SMTP_USER=... -e SMTP_PASSWORD=... \
+  unp-epc-qr-mail
 ```
 
-Для чтения UNP QR из PDF нужна системная библиотека **ZBar** (для `pyzbar`):
-
-- **macOS:** `brew install zbar`
-- **Ubuntu/Debian:** `sudo apt install libzbar0`
-- **Windows:** см. [pyzbar](https://github.com/NaturalHistoryMuseum/pyzbar)
-
-Без ZBar программа не сможет извлечь данные из QR и сообщит об отсутствии UNP кодов.
-
-## Использование
+Example with `.env` file:
 
 ```bash
-python main.py vhodni_placilni_nalogi.pdf -o izhod_epc_qr.pdf
+# .env
+IMAP_HOST=imap.gmail.com
+IMAP_USER=your@gmail.com
+IMAP_PASSWORD=app-password
+IMAP_MAILBOX=INBOX
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@gmail.com
+SMTP_PASSWORD=app-password
+SMTP_USE_TLS=1
+POLL_INTERVAL=120
 ```
 
-- `vhodni_placilni_nalogi.pdf` — PDF с платёжными поручениями (с QR и/или текстом).
-- `-o izhod_epc_qr.pdf` — выходной PDF (по умолчанию: к имени входного файла добавляется `_epc_qr.pdf`).
-- `-d` — вывод отладочной информации (извлечённый текст или факт чтения из QR, список платежей).
+```bash
+docker run --rm --env-file .env unp-epc-qr-mail
+```
 
-## Формат UPN QR (содержимое UNP-кода)
+## Notes
 
-Строка после декодирования QR разбирается по строкам (разделитель `\n`):
-
-- Строка 0: `UPNQR`
-- Строки 5–7: плательщик (имя, улица, город)
-- Строка 8: сумма (11 цифр, последние 2 — копейки)
-- Строки 11–12: код и текст назначения
-- Строка 13: срок платежа
-- Строки 14–15: IBAN и референс получателя
-- Строки 16–18: получатель (имя, улица, город)
-
-Используется порядок полей по [upn-qr.si](https://www.upn-qr.si/) / NavodilaZaProgramerjeUPNQR.
-
-## Лицензия
-
-MIT.
+- Only **unread** messages are processed. Read messages are left as-is.
+- Only attachments whose filename ends in `.pdf` are considered.
+- If a PDF has no UNP QR codes, the reply still includes the original PDF and a body line like "No UNP QR codes found in the attached PDF(s)."
+- The service runs in an infinite loop with `POLL_INTERVAL` seconds between runs.
